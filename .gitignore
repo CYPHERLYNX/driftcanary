@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+.eggs/
+.pytest_cache/
+.mypy_cache/
+
+# driftcanary runtime data (local dev runs)
+.driftcanary/
+report.html
+
+# OS / editors
+.DS_Store
+Thumbs.db
+.idea/
+*.swp
+*~
