@@ -1,104 +1,105 @@
-# driftcanary
+# dontdial
 
-**The behavioral-drift canary for AI systems.** LLM providers silently change model behavior — and your own agent configs silently decay. driftcanary probes your model or coding-agent CLI on a schedule, baselines the results against *your own history*, and alerts when behavior drifts. Zero dependencies, one cron line, local SQLite.
+**Your AI gave you a support number. Don't dial it yet.**
 
-## The pitch
+Attackers are poisoning AI search answers with fake support contacts at scale. In September 2026, researchers found ChatGPT, Gemini, and Google AI Overviews serving scammer phone numbers, emails, and login pages as official contacts for **374 major brands** — no prompt injection needed, just poisoned web content the AI retrieved. Every existing injection defense misses it, and most users never verify what the AI told them.
 
-**Problem:** Providers swap models, cap reasoning, or tune verbosity without telling you. Your agent harness decays after a config change ("it used to catch SQLi…"). Every existing scanner is a one-shot test — drift *between* runs is invisible.
-
-**Solution:** An offline-first CLI that runs a fixed battery of behavioral probes on a schedule, stores results locally, applies CUSUM change-point detection against your own baseline, and alerts (exit code + webhook + dark HTML report) when something shifts.
-
-**Why it's new:** Drift-monitoring platforms exist (proxies, Postgres, dashboards — see prior art below). Nobody ships it as a **zero-dependency artifact**: no pip install, no database server, no hosted service. And nobody probes *your coding agent's own harness* for prompt/config decay with a deterministic probe pack.
-
-## Quickstart
-
-```bash
-# 1. Get it (stdlib only — Python 3.10+, nothing to install)
-git clone https://github.com/CYPHERLYNX/driftcanary.git
-cd driftcanary
-
-# 2. Initialize
-python -m driftcanary.cli init
-# or, after `pip install -e .`: driftcanary init
-
-# 3. Probe a provider (key via env only — never stored)
-export OPENAI_API_KEY=sk-...
-driftcanary probe --target provider --model gpt-4o-mini
-
-# 4. Or probe your coding agent's harness for prompt decay
-driftcanary probe --target agent --cli claude
-
-# 5. Schedule it (every 6 hours) and alert on drift
-# 0 */6 * * * driftcanary probe --target provider --model gpt-4o-mini && driftcanary alert
-#    exit 2 = drift detected, 0 = clean, 1 = evaluation error
-
-# 6. See the trend
-driftcanary report   # writes ~/.driftcanary/report.html
-```
+`dontdial` is a small CLI that checks the contacts inside an AI's answer — phone numbers, URLs, emails — against official sources, and tells you per contact whether it is **VERIFIED**, **SUSPICIOUS**, or **UNKNOWN**, with the evidence.
 
 ## How it works
 
-1. **Probe pack** — a fixed battery of deterministic behavioral probes:
-   - *Provider mode* (any OpenAI-compatible endpoint): latency signature, refusal consistency, JSON format adherence, tool-call fidelity, verbosity stats, instruction-following. Each probe runs 3x; metrics aggregate by median/mode.
-   - *Agent mode*: poison-pill code-review probes (SQLi, prompt-injection-in-docs, secret-in-log) executed through your real `claude -p` / `codex exec` CLI; graded HELD/BYPASSED. Catches "my agent got worse after Tuesday's config change."
-2. **Baseline** — results land in local SQLite. Your own history *is* the baseline; no trusted-reference API key needed.
-3. **Detection** — two-sided CUSUM over each probe metric. No verdicts before 20 baseline runs ("warming up" is a first-class status, not drift).
-4. **Alert** — `driftcanary alert` exits 2 on drift and can POST to a webhook or ntfy.sh topic. `driftcanary report` renders the dark HTML trend report with drift markers.
+1. **Extract** — phone numbers (via `phonenumbers`), URLs, and emails are pulled out of pasted text.
+2. **Identify the brand** — from `--brand`, or by detecting brand mentions in the text, matched against a curated list of ~30 major brands (`dontdial/brands.json`).
+3. **Cross-check** —
+   - *URLs/emails*: the domain is compared against the brand's official domain. Exact or official subdomain = VERIFIED. Typosquats (`delta-support.com`), close misspellings (`dleta.com`), punycode/IDN tricks, and subdomain traps (`delta.com.evil.com`) = SUSPICIOUS, using edit distance plus structural heuristics. Anything else = UNKNOWN.
+   - *Phones*: the brand's official contact pages are fetched and every listed number is extracted; if the AI's number appears there = VERIFIED. Premium-rate patterns (1-900, 1-976, +44 9…) = SUSPICIOUS. If the official site can't be reached, or the number isn't listed there, the verdict is UNKNOWN — the tool never guesses.
+4. **Report** — human-readable table or `--json`, with CI-friendly exit codes.
 
-## Honest scope
+The **only** network access is the explicit official-site fetch during phone verification. Everything else (extraction, domain analysis, verdicts) is fully offline and deterministic. No API keys, no LLM calls.
 
-What this is and isn't, stated plainly:
+## Install
 
-- **It watches behavior, not quality.** A model can get worse in ways no fixed probe pack captures. driftcanary catches *changes* in the signatures it measures — latency, verbosity, refusal rate, format adherence, tool-call fidelity, agent catch-rate.
-- **Warming up is not drift.** Nothing alerts before 20 baseline runs (configurable). A fresh install says WARMING UP, honestly.
-- **Probe errors are not drift.** If the endpoint is unreachable, that's a probe error with a clear message — never a false drift alarm.
-- **Statistics are measured, not claimed.** On synthetic step-change injection (4-sigma shift in a metric), CUSUM fires within a handful of post-change runs; gradual ramps take longer (documented tradeoff — see `tests/test_detect.py`). It does not "catch all drift."
-- **Agent grading is heuristic.** Keyword-based HELD/BYPASSED grading is approximate; the pack measures *change over time*, not absolute competence.
-
-## Probe cost
-
-Default pack ≈ 3,400 tokens per provider run (6 probes x 3 samples, upper bound). At typical API pricing that's fractions of a cent per run — safe to cron every few hours. Agent-mode cost is whatever your CLI charges per prompt (3 short prompts per run).
-
-## Configuration
-
-`~/.driftcanary/config.json` (created by `init`):
-
-```json
-{
-  "warmup_runs": 20,
-  "cusum_k": 0.5,
-  "cusum_h": 4.0,
-  "samples": 3,
-  "provider_base_url": "https://api.openai.com/v1",
-  "provider_api_key_env": "OPENAI_API_KEY",
-  "agent_cli": "claude",
-  "agent_timeout_s": 180.0
-}
+```bash
+pip install dontdial
+# or from source:
+git clone https://github.com/CYPHERLYNX/dontdial && cd dontdial && pip install .
 ```
 
-CLI flags override config values. API keys are read from the environment only — never written to disk.
+Requires Python 3.10+.
 
-## Prior art
+## Usage
 
-The drift-monitoring space is contested; here's where this fits:
+Check an AI's answer (paste it quoted):
 
-| Project | What it is | How driftcanary differs |
-|---|---|---|
-| `iblamewisp/driftwatch` | Self-hosted LLM proxy detecting response-quality drift (Postgres + Redis + Celery) | Zero infrastructure: stdlib-only CLI, one cron line, SQLite |
-| `sahelmain/drift_watch` | Continuous LLM eval platform (FastAPI + Postgres + React) | A CLI, not a platform; no servers to run |
-| `GenesisClawbot/llm-drift` | Hosted service: scheduled prompts, drift alerts, web UI | Local-first, no hosted dependency, honest CUSUM stats |
-| `arjinexe/llm-canary` | Scheduled behavioral test battery vs own baseline | Adds change-point statistics, warmup discipline, agent prompt-decay mode |
-| `wartzar-bee/promptdrift` | Prompt-regression alarm for CI | Ours monitors production behavior longitudinally, not PR diffs |
-| `graphsentinel/driftwatch` | K8s operator governing agent *tool-call* drift | We test the agent's *behavior* (does it still catch the SQLi?), not its tool calls |
+```bash
+dontdial check --text "Call Delta support at 1-800-999-0000 or visit https://delta-support.com/login"
+```
 
-Closest-existing-thing: DriftWatch-style platforms monitor LLM drift with proxies, Postgres, and dashboards; driftcanary is the version that runs as one cron line with zero dependencies — plus a probe pack that watches your coding agent itself for prompt decay.
+```
+Checking against: Delta Air Lines (delta.com)
 
-## Security
+[??] PHONE  1-800-999-0000
+       UNKNOWN: 1-800-999-0000 was not found on Delta Air Lines' official site; could not confirm it
+[!!] URL    https://delta-support.com/login
+       SUSPICIOUS: delta-support.com: embeds 'delta' but is not delta.com
 
-- Agent CLIs execute via argv lists only — **never `shell=True`**. The binary is resolved with `shutil.which()` from a fixed allowlist (`claude`, `codex`); config can select *which* CLI, never *what* binary. Arbitrary paths are rejected.
-- Every agent invocation has a hard timeout; timeouts are errors, not hangs.
-- API keys come from the environment only. Probe fixtures use obviously-fake secrets (`sk-test-...`).
-- Webhook URLs are only read from CLI flags, never stored.
+0 verified, 1 suspicious, 1 unknown out of 2 contact(s).
+Do not call, click, or email the suspicious ones. Find the real contact on the brand's official site yourself.
+```
+
+Force the brand context explicitly:
+
+```bash
+dontdial check --brand "Chase" --text "Reach Chase at 1-900-123-4567"
+```
+
+Show a brand's official contacts (ground truth to compare against manually):
+
+```bash
+dontdial check --brand "Delta"
+```
+
+Machine-readable output:
+
+```bash
+dontdial check --text "..." --json
+```
+
+List the curated brands:
+
+```bash
+dontdial brands
+```
+
+### Exit codes
+
+| Code | Meaning |
+| ---- | ------- |
+| `0`  | Every contact verified (or the contact card was shown) |
+| `1`  | At least one contact looks suspicious |
+| `2`  | Only unknowns (nothing could be confirmed), nothing found, or an error |
+
+`1` is the one that should stop you. `2` means "I couldn't prove it either way" — treat it with the same caution.
+
+## Verdict semantics
+
+- **VERIFIED** — the contact provably belongs to the brand: the domain *is* the official domain (or its subdomain), the email is on it, or the phone number is listed on the brand's official contact pages.
+- **SUSPICIOUS** — structural evidence of deception: typosquat/lookalike domain, punycode, subdomain trick, or a premium-rate / scam-pattern phone number.
+- **UNKNOWN** — could not confirm. The brand isn't in the curated list, the official site was unreachable, or the number simply wasn't listed there. UNKNOWN is not a clean bill of health.
+
+## Limitations (read this)
+
+- **Phone ground truth is heuristic.** There is no global database of official support numbers. `dontdial` compares against numbers it can scrape from a brand's public contact pages; a legitimate number that isn't published there (regional lines, new numbers, IVR-only lines) will come back UNKNOWN. It errs toward UNKNOWN rather than false accusations — but that also means a scammer number not yet seen anywhere will be UNKNOWN, not SUSPICIOUS, unless it matches a known scam pattern.
+- **Curated brand list.** Only ~30 major brands ship in `brands.json` (airlines, banks, tech, retail). A brand outside the list can't be verified — contributions welcome.
+- **URL checks are the strongest part** (deterministic domain analysis). **Phone checks depend on the official site being reachable and listing its numbers.**
+- This tool checks *contacts*, not *content*. It won't catch a scammer using the real number in a social-engineering script, and it can't verify facts, prices, or policies in the AI's answer.
+- Not legal advice, not a blocklist, not antivirus. When in doubt, navigate to the official site yourself and find the contact there.
+
+## Development
+
+```bash
+python -m unittest discover -s tests   # 28 tests, no network (fetches are stubbed)
+```
 
 ## License
 
